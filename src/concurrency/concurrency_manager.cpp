@@ -48,16 +48,26 @@ auto sageFlow::ConcurrencyManager::create_index(const std::string& name, const I
 }
 
 auto sageFlow::ConcurrencyManager::create_index(const std::string& name, const IndexType& index_type, int dimension,
-                                                 int nlist, double rebuild_threshold, int nprobes) -> int {
+                                                 const IndexParameters& params) -> int {
   std::shared_ptr<Index> index = nullptr;
   switch (index_type) {
     case IndexType::None:
       return -1;
     case IndexType::IVF:
-      index = std::make_shared<Ivf>(nlist, rebuild_threshold, nprobes);
+      if (auto* ivf_params = std::get_if<IVFParameters>(&params)) {
+        index = std::make_shared<Ivf>(ivf_params->nlist, ivf_params->rebuild_threshold, ivf_params->nprobes);
+      } else {
+        // Use default parameters if wrong type provided
+        index = std::make_shared<Ivf>();
+      }
       break;
     case IndexType::HNSW:
-      index = std::make_shared<HNSW>();
+      if (auto* hnsw_params = std::get_if<HNSWParameters>(&params)) {
+        index = std::make_shared<HNSW>(hnsw_params->m, hnsw_params->ef_construction, hnsw_params->ef_search);
+      } else {
+        // Use default parameters if wrong type provided
+        index = std::make_shared<HNSW>();
+      }
       break;
     case IndexType::Vectraflow:
       index = std::make_shared<VectraFlow>();

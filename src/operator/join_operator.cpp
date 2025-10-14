@@ -29,13 +29,10 @@ bool JoinOperator::createIndexPair(IndexType type, const std::string& prefix) {
     return left_index_id_ != -1 && right_index_id_ != -1;
 }
 
-bool JoinOperator::createIndexPair(IndexType type, const std::string& prefix,
-                                    int nlist, double rebuild_threshold, int nprobes) {
+bool JoinOperator::createIndexPair(IndexType type, const std::string& prefix, const IndexParameters& params) {
     if (!concurrency_manager_) return false;
-    left_index_id_ = concurrency_manager_->create_index(prefix + "_left", type, join_func_->getDim(),
-                                                         nlist, rebuild_threshold, nprobes);
-    right_index_id_ = concurrency_manager_->create_index(prefix + "_right", type, join_func_->getDim(),
-                                                          nlist, rebuild_threshold, nprobes);
+    left_index_id_ = concurrency_manager_->create_index(prefix + "_left", type, join_func_->getDim(), params);
+    right_index_id_ = concurrency_manager_->create_index(prefix + "_right", type, join_func_->getDim(), params);
     return left_index_id_ != -1 && right_index_id_ != -1;
 }
 
@@ -83,10 +80,14 @@ JoinOperator::JoinOperator(std::unique_ptr<Function> &join_func,
         int nlist = static_cast<int>(4.0 * std::sqrt(static_cast<double>(window_size)));
         // Ensure nlist is at least 1
         if (nlist < 1) nlist = 1;
-        double rebuild_threshold = 1.5;
-        int nprobes = 10;
         
-        if (createIndexPair(IndexType::IVF, "join_ivf", nlist, rebuild_threshold, nprobes)) {
+        IVFParameters ivf_params{
+            .nlist = nlist,
+            .rebuild_threshold = 1.5,
+            .nprobes = 10
+        };
+        
+        if (createIndexPair(IndexType::IVF, "join_ivf", ivf_params)) {
             use_index_ = true;
             join_method_ = std::make_unique<IvfJoinMethod>(left_index_id_, right_index_id_,
                                                            join_similarity_threshold_, concurrency_manager_);
