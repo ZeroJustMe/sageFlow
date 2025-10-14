@@ -47,6 +47,40 @@ auto sageFlow::ConcurrencyManager::create_index(const std::string& name, const I
   return index->index_id_;
 }
 
+auto sageFlow::ConcurrencyManager::create_index(const std::string& name, const IndexType& index_type, int dimension,
+                                                 int nlist, double rebuild_threshold, int nprobes) -> int {
+  std::shared_ptr<Index> index = nullptr;
+  switch (index_type) {
+    case IndexType::None:
+      return -1;
+    case IndexType::IVF:
+      index = std::make_shared<Ivf>(nlist, rebuild_threshold, nprobes);
+      break;
+    case IndexType::HNSW:
+      index = std::make_shared<HNSW>();
+      break;
+    case IndexType::Vectraflow:
+      index = std::make_shared<VectraFlow>();
+      break;
+    case IndexType::BruteForce:
+    default:
+      index = std::make_shared<Knn>();
+      break;
+  }
+  index->index_id_ = index_id_counter_++;
+  index->index_type_ = index_type;
+  index->dimension_ = dimension;
+
+  index->storage_manager_ = storage_;
+  storage_->engine_ = std::make_shared<ComputeEngine>();
+
+  const auto blank_controller = std::make_shared<BlankController>(index);
+
+  controller_map_[index->index_id_] = blank_controller;
+  index_map_[name] = IdWithType{.id_ = index->index_id_, .index_type_ = index_type};
+  return index->index_id_;
+}
+
 auto sageFlow::ConcurrencyManager::create_index(const std::string& name, int dimension) -> int {
   return create_index(name, IndexType::BruteForce, dimension);
 }

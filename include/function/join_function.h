@@ -31,6 +31,11 @@ namespace sageFlow {
       lastEmitted = -1;
     }
 
+    auto getWindowSize() const -> int64_t {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return windowSize;
+    }
+
     auto windowTimeLimit(int64_t timestamp) const -> int64_t {
       std::lock_guard<std::mutex> lock(mutex_);
       return timestamp - windowSize;
@@ -118,6 +123,8 @@ namespace sageFlow {
     auto setOtherStream(std::shared_ptr<Stream> other_plan) -> void;
   
     auto setWindow(int64_t time_window, int64_t stepsize) -> void;
+
+    auto getWindowSize() const -> int64_t;
   
     SlidingWindow windowL, windowR;
     ThreadSafeSlidingWindow threadSafeWindowL, threadSafeWindowR;

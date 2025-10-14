@@ -9,6 +9,7 @@
 #include <cassert>
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 
 #include "utils/logger.h"
 
@@ -25,6 +26,16 @@ bool JoinOperator::createIndexPair(IndexType type, const std::string& prefix) {
     if (!concurrency_manager_) return false;
     left_index_id_ = concurrency_manager_->create_index(prefix + "_left", type, join_func_->getDim());
     right_index_id_ = concurrency_manager_->create_index(prefix + "_right", type, join_func_->getDim());
+    return left_index_id_ != -1 && right_index_id_ != -1;
+}
+
+bool JoinOperator::createIndexPair(IndexType type, const std::string& prefix,
+                                    int nlist, double rebuild_threshold, int nprobes) {
+    if (!concurrency_manager_) return false;
+    left_index_id_ = concurrency_manager_->create_index(prefix + "_left", type, join_func_->getDim(),
+                                                         nlist, rebuild_threshold, nprobes);
+    right_index_id_ = concurrency_manager_->create_index(prefix + "_right", type, join_func_->getDim(),
+                                                          nlist, rebuild_threshold, nprobes);
     return left_index_id_ != -1 && right_index_id_ != -1;
 }
 
@@ -66,7 +77,16 @@ JoinOperator::JoinOperator(std::unique_ptr<Function> &join_func,
 
     if (algo == "ivf") {
         index_kind_ = InternalIndexKind::IVF;
-        if (createIndexPair(IndexType::IVF, "join_ivf")) {
+        // Calculate IVF parameters based on window size
+        // nlist = 4 * sqrt(window_size), rebuild_threshold = 1.5, nprobes = 10
+        int64_t window_size = join_func_->getWindowSize();
+        int nlist = static_cast<int>(4.0 * std::sqrt(static_cast<double>(window_size)));
+        // Ensure nlist is at least 1
+        if (nlist < 1) nlist = 1;
+        double rebuild_threshold = 1.5;
+        int nprobes = 10;
+        
+        if (createIndexPair(IndexType::IVF, "join_ivf", nlist, rebuild_threshold, nprobes)) {
             use_index_ = true;
             join_method_ = std::make_unique<IvfJoinMethod>(left_index_id_, right_index_id_,
                                                            join_similarity_threshold_, concurrency_manager_);
