@@ -75,9 +75,12 @@ JoinOperator::JoinOperator(std::unique_ptr<Function> &join_func,
     if (algo == "ivf") {
         index_kind_ = InternalIndexKind::IVF;
         // Calculate IVF parameters based on window size
-        // nlist = 4 * sqrt(window_size), rebuild_threshold = 1.5, nprobes = 10
+        // nlist = 4 * sqrt(window_size/step_size), rebuild_threshold = 1.5, nprobes = 10
         int64_t window_size = join_func_->getWindowSize();
-        int nlist = static_cast<int>(4.0 * std::sqrt(static_cast<double>(window_size)));
+        int64_t step_size = join_func_->getStepSize();
+        // Calculate actual vector count in window
+        int64_t vector_count = (step_size > 0) ? (window_size / step_size) : window_size;
+        int nlist = static_cast<int>(4.0 * std::sqrt(static_cast<double>(vector_count)));
         // Ensure nlist is at least 1
         if (nlist < 1) nlist = 1;
         
