@@ -365,6 +365,7 @@ TEST_P(JoinDataSourceModesTest, DataSourceModePerformance) {
   std::vector<std::unique_ptr<VectorRecord>> right_records;
   right_records.reserve(left_records.size());
   constexpr uint64_t kRightUidOffset = 500000;
+  constexpr uint64_t kModuloBase = 1000000ULL;
   for (auto& lr : left_records) {
     right_records.push_back(std::make_unique<VectorRecord>(lr->uid_ + kRightUidOffset, lr->timestamp_, lr->data_));
   }
@@ -372,8 +373,8 @@ TEST_P(JoinDataSourceModesTest, DataSourceModePerformance) {
   const size_t expected_left = left_records.size();
   const size_t expected_right = right_records.size();
   
-  // Compute expected matches
-  auto expected_matches = computeExpectedPairsByTraversal(left_records, right_records, mode_config.threshold, win_ms);
+  // Compute expected matches - use consistent UID mapping
+  auto expected_matches = computeExpectedPairsByTraversal(left_records, right_records, mode_config.threshold, win_ms, 0.1, kModuloBase);
   const uint64_t expected_emit_count = static_cast<uint64_t>(expected_matches.size());
   
   // Create stream sources
@@ -428,6 +429,9 @@ TEST_P(JoinDataSourceModesTest, DataSourceModePerformance) {
     using namespace std::chrono_literals;
     bool timed_out = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1000);
+    // For eager join, we only need to wait for inputs to be processed
+    // Windows won't drain fully until window time passes after last record
+    bool is_eager_method = (method.find("eager") != std::string::npos);
     for (;;) {
       uint64_t l = JoinMetrics::instance().total_records_left.load();
       uint64_t r = JoinMetrics::instance().total_records_right.load();
@@ -436,9 +440,22 @@ TEST_P(JoinDataSourceModesTest, DataSourceModePerformance) {
       uint64_t completed_right = JoinMetrics::instance().window_records_right_completed.load();
       bool inputs_drained = (l >= expected_left && r >= expected_right);
       bool windows_drained = (completed_left >= expected_left && completed_right >= expected_right);
-      if (inputs_drained && windows_drained) {
-        std::this_thread::sleep_for(500ms);
-        break;
+      // For eager methods, just check if inputs are drained and output has stabilized
+      if (is_eager_method) {
+        if (inputs_drained) {
+          std::this_thread::sleep_for(200ms);
+          uint64_t emitted_after_wait = JoinMetrics::instance().total_emits.load();
+          if (emitted_after_wait == emitted) {
+            // Output has stabilized, we're done
+            break;
+          }
+        }
+      } else {
+        // For lazy methods, wait for windows to drain
+        if (inputs_drained && windows_drained) {
+          std::this_thread::sleep_for(500ms);
+          break;
+        }
       }
       if (std::chrono::steady_clock::now() >= deadline) {
         timed_out = true;

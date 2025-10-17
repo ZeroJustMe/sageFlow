@@ -584,11 +584,6 @@ auto JoinOperator::apply(Response&& record, int slot, Collector& collector) -> v
             JoinMetrics::instance().e2e_latency_count.fetch_add(1, std::memory_order_relaxed);
 #endif
         }
-        if (slot == left_slot_id_) {
-          JoinMetrics::instance().window_records_left_completed.fetch_add(1, std::memory_order_relaxed);
-        } else {
-          JoinMetrics::instance().window_records_right_completed.fetch_add(1, std::memory_order_relaxed);
-        }
 #ifdef SAGEFLOW_ENABLE_METRICS
     }
 #endif
