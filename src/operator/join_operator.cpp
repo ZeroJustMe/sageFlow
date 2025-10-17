@@ -6,6 +6,7 @@
 #include "operator/join_operator_methods/join_methods.h"
 #include "operator/join_metrics.h"
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <algorithm>
@@ -82,11 +83,11 @@ JoinOperator::JoinOperator(std::unique_ptr<Function> &join_func,
         int64_t vector_count = (step_size > 0) ? (window_size / step_size) : window_size;
         int nlist = static_cast<int>(4.0 * std::sqrt(static_cast<double>(vector_count)));
         // Ensure nlist is at least 1
-        if (nlist < 1) nlist = 1;
+        nlist = std::max(nlist, 1);
         
         IVFParameters ivf_params{
             .nlist = nlist,
-            .rebuild_threshold = 1.5,
+            .rebuild_threshold = 2.0,
             .nprobes = 10
         };
         
@@ -150,8 +151,12 @@ auto JoinOperator::updateSideThreadSafe(
         JoinMetrics::instance().lock_wait_ns.fetch_add(waited, std::memory_order_relaxed);
         JoinMetrics::instance().window_insert_ns.fetch_add(waited, std::memory_order_relaxed);
     }
-    if (slot==0) JoinMetrics::instance().total_records_left.fetch_add(1,std::memory_order_relaxed); else JoinMetrics::instance().total_records_right.fetch_add(1,std::memory_order_relaxed);
 #endif
+    if (slot == 0) {
+      JoinMetrics::instance().total_records_left.fetch_add(1,std::memory_order_relaxed);
+    } else {
+      JoinMetrics::instance().total_records_right.fetch_add(1,std::memory_order_relaxed);
+    }
     // 窗口插入阶段（仅插入）
     {
 #ifdef SAGEFLOW_ENABLE_METRICS
@@ -182,6 +187,7 @@ auto JoinOperator::updateSideThreadSafe(
     int64_t timelimit = window.windowTimeLimit(now_time_stamp);
     // 窗口过期阶段（包含过期判定与容器维护；索引删除单独计时）
     SAGEFLOW_LOG_DEBUG("JOIN", "Expiring records before timestamp {} now={} current_size={} ", timelimit, now_time_stamp, records.size());
+    size_t expired_count = 0;
     try {
         // 过期阶段的容器维护开销：将每次 pop_front 计入 window_insert_ns，索引删除计入 index_insert_ns。
         while (!records.empty() && records.front()->timestamp_ <= timelimit) {
@@ -191,6 +197,7 @@ auto JoinOperator::updateSideThreadSafe(
                 ScopedTimerAtomic t_window_expire_unit(JoinMetrics::instance().window_insert_ns);
 #endif
                 records.pop_front();
+                ++expired_count;
             }
             if (use_index_ && concurrency_manager_ && index_id_for_cc != -1) {
 #ifdef SAGEFLOW_ENABLE_METRICS
@@ -204,6 +211,13 @@ auto JoinOperator::updateSideThreadSafe(
         SAGEFLOW_LOG_DEBUG("JOIN", "Expiration loop finished. current_size={} ", records.size());
     } catch (const std::exception& e) {
         SAGEFLOW_LOG_ERROR("JOIN", "Exception during expiration: what={} ", e.what());
+    }
+    if (expired_count > 0) {
+        if (slot == 0) {
+            JoinMetrics::instance().window_records_left_completed.fetch_add(expired_count, std::memory_order_relaxed);
+        } else {
+            JoinMetrics::instance().window_records_right_completed.fetch_add(expired_count, std::memory_order_relaxed);
+        }
     }
 
     SAGEFLOW_LOG_DEBUG("JOIN", "Before unlocking records mutex. size={} ", records.size());
@@ -253,8 +267,8 @@ auto JoinOperator::process(Response& input_data, int slot) -> std::optional<Resp
     return std::nullopt;
 }
 
-std::vector<std::unique_ptr<VectorRecord>> JoinOperator::getCandidates(
-    const std::unique_ptr<VectorRecord>& data_ptr, int slot) {
+auto JoinOperator::getCandidates(
+    const std::unique_ptr<VectorRecord>& data_ptr, int slot) -> std::vector<std::unique_ptr<VectorRecord>> {
 #ifdef SAGEFLOW_ENABLE_METRICS
     ScopedTimerAtomic t_fetch(JoinMetrics::instance().candidate_fetch_ns);
 #endif
@@ -271,10 +285,9 @@ std::vector<std::unique_ptr<VectorRecord>> JoinOperator::getCandidates(
 #ifdef SAGEFLOW_ENABLE_METRICS
     JoinMetrics::instance().lock_wait_ns.fetch_add(ScopedAccumulateAtomic::now_ns() - before_wait, std::memory_order_relaxed);
 #endif
-        for (auto &p : left_records_)
-          if (p) {
-            query_records_copy.emplace_back(std::make_unique<VectorRecord>(*p));
-          }
+        for (auto &p : left_records_) {
+          if (p) query_records_copy.emplace_back(std::make_unique<VectorRecord>(*p));
+        }
     } else {
     // 加锁等待计入 lock_wait
 #ifdef SAGEFLOW_ENABLE_METRICS
@@ -292,9 +305,9 @@ std::vector<std::unique_ptr<VectorRecord>> JoinOperator::getCandidates(
     return join_method_->ExecuteLazy(query_records_copy, slot);
 }
 
-bool JoinOperator::validateCandidateInWindow(
+auto JoinOperator::validateCandidateInWindow(
     const std::unique_ptr<VectorRecord>& candidate,
-    const std::deque<std::unique_ptr<VectorRecord>>& window_records) {
+    const std::deque<std::unique_ptr<VectorRecord>>& window_records) -> bool {
     if (!candidate) return false;
     for (auto &r : window_records) if (r && r->uid_ == candidate->uid_) return true;
     return false;
@@ -560,17 +573,22 @@ auto JoinOperator::apply(Response&& record, int slot, Collector& collector) -> v
     {
         ScopedTimerAtomic t_emit(JoinMetrics::instance().emit_ns);
 #endif
-    for (auto &p : local_return_pool) {
-        Response out{ResponseType::Record, std::move(p.second)};
-        collector.collect(std::make_unique<Response>(std::move(out)), p.first);
+        for (auto &p : local_return_pool) {
+            Response out{ResponseType::Record, std::move(p.second)};
+            collector.collect(std::make_unique<Response>(std::move(out)), p.first);
+            JoinMetrics::instance().total_emits.fetch_add(1,std::memory_order_relaxed);
 #ifdef SAGEFLOW_ENABLE_METRICS
-        JoinMetrics::instance().total_emits.fetch_add(1,std::memory_order_relaxed);
-        // 端到端延迟：从 apply 进入到对应结果发射的时长（按每条结果计）
-        const uint64_t now_ns = ScopedAccumulateAtomic::now_ns();
-        JoinMetrics::instance().e2e_latency_ns.fetch_add(now_ns - apply_enter_ns, std::memory_order_relaxed);
-        JoinMetrics::instance().e2e_latency_count.fetch_add(1, std::memory_order_relaxed);
+            // 端到端延迟：从 apply 进入到对应结果发射的时长（按每条结果计）
+            const uint64_t now_ns = ScopedAccumulateAtomic::now_ns();
+            JoinMetrics::instance().e2e_latency_ns.fetch_add(now_ns - apply_enter_ns, std::memory_order_relaxed);
+            JoinMetrics::instance().e2e_latency_count.fetch_add(1, std::memory_order_relaxed);
 #endif
-    }
+        }
+        if (slot == left_slot_id_) {
+          JoinMetrics::instance().window_records_left_completed.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          JoinMetrics::instance().window_records_right_completed.fetch_add(1, std::memory_order_relaxed);
+        }
 #ifdef SAGEFLOW_ENABLE_METRICS
     }
 #endif
