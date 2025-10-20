@@ -68,6 +68,14 @@ namespace sageFlow {
         int slot,
         std::vector<std::pair<int, std::unique_ptr<VectorRecord>>>& local_return_pool);
 
+    // 执行join操作的辅助方法（假定已持有对面窗口的锁）
+    void executeJoinForCandidatesWithLockHeld(
+        const std::vector<std::unique_ptr<VectorRecord>>& candidates,
+        const std::unique_ptr<VectorRecord>& data_ptr,
+        int slot,
+        const std::deque<std::unique_ptr<VectorRecord>>& opposite_window,
+        std::vector<std::pair<int, std::unique_ptr<VectorRecord>>>& local_return_pool);
+
     // Lazy模式的join执行辅助方法
     void executeLazyJoin(
         const std::vector<std::unique_ptr<VectorRecord>>& candidates,
