@@ -309,6 +309,28 @@ auto JoinOperator::getCandidates(
     return join_method_->ExecuteLazy(query_records_copy, slot);
 }
 
+auto JoinOperator::getCandidatesWithLocksHeld(
+    const std::unique_ptr<VectorRecord>& data_ptr, int slot) -> std::vector<std::unique_ptr<VectorRecord>> {
+    // This version assumes both window locks are already held by caller
+#ifdef SAGEFLOW_ENABLE_METRICS
+    ScopedTimerAtomic t_fetch(JoinMetrics::instance().candidate_fetch_ns);
+#endif
+    if (is_eager_) {
+        return join_method_->ExecuteEager(*data_ptr, slot);
+    }
+    std::deque<std::unique_ptr<VectorRecord>> query_records_copy;
+    if (slot == left_slot_id_) {
+        for (auto &p : left_records_) {
+          if (p) query_records_copy.emplace_back(std::make_unique<VectorRecord>(*p));
+        }
+    } else {
+        for (auto &p : right_records_) {
+          if (p) query_records_copy.emplace_back(std::make_unique<VectorRecord>(*p));
+        }
+    }
+    return join_method_->ExecuteLazy(query_records_copy, slot);
+}
+
 auto JoinOperator::validateCandidateInWindow(
     const std::unique_ptr<VectorRecord>& candidate,
     const std::deque<std::unique_ptr<VectorRecord>>& window_records) -> bool {
@@ -504,6 +526,73 @@ void JoinOperator::executeLazyJoin(
     }
 }
 
+void JoinOperator::executeLazyJoinWithLocksHeld(
+    const std::vector<std::unique_ptr<VectorRecord>>& candidates,
+    int slot,
+    std::vector<std::pair<int, std::unique_ptr<VectorRecord>>>& local_return_pool) {
+    // This version assumes both window locks are already held by caller
+#ifdef SAGEFLOW_ENABLE_METRICS
+    ScopedTimerAtomic t_similarity(JoinMetrics::instance().similarity_ns);
+#endif
+    if (slot == left_slot_id_) {
+        for (auto &l : left_records_) {
+            if (!l) continue;
+            for (auto &cand : candidates) {
+                if (validateCandidateInWindow(cand, right_records_)) {
+                    auto left_copy = std::make_unique<VectorRecord>(*l);
+                    auto right_copy = std::make_unique<VectorRecord>(*cand);
+                    Response lhs{ResponseType::Record, std::move(left_copy)};
+                    Response rhs{ResponseType::Record, std::move(right_copy)};
+                    try {
+#ifdef SAGEFLOW_ENABLE_METRICS
+                        ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
+#endif
+                        auto res = join_func_->Execute(lhs, rhs);
+                        if (res.record_) local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
+                    } catch (const std::exception& e) {
+                        SAGEFLOW_LOG_ERROR("JOIN_LAZY", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
+                                         slot,
+                                         (lhs.record_ ? lhs.record_->data_.dim_ : -1),
+                                         (rhs.record_ ? rhs.record_->data_.dim_ : -1),
+                                         (lhs.record_ ? lhs.record_->uid_ : 0),
+                                         (rhs.record_ ? rhs.record_->uid_ : 0),
+                                         e.what());
+                        throw;
+                    }
+                }
+            }
+        }
+    } else {
+        for (auto &r : right_records_) {
+            if (!r) continue;
+            for (auto &cand : candidates) {
+                if (validateCandidateInWindow(cand, left_records_)) {
+                    auto left_copy = std::make_unique<VectorRecord>(*cand);
+                    auto right_copy = std::make_unique<VectorRecord>(*r);
+                    Response lhs{ResponseType::Record, std::move(left_copy)};
+                    Response rhs{ResponseType::Record, std::move(right_copy)};
+                    try {
+#ifdef SAGEFLOW_ENABLE_METRICS
+                        ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
+#endif
+                        auto res = join_func_->Execute(lhs, rhs);
+                        if (res.record_) local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
+                    } catch (const std::exception& e) {
+                        SAGEFLOW_LOG_ERROR("JOIN_LAZY", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
+                                         slot,
+                                         (lhs.record_ ? lhs.record_->data_.dim_ : -1),
+                                         (rhs.record_ ? rhs.record_->data_.dim_ : -1),
+                                         (lhs.record_ ? lhs.record_->uid_ : 0),
+                                         (rhs.record_ ? rhs.record_->uid_ : 0),
+                                         e.what());
+                        throw;
+                    }
+                }
+            }
+        }
+    }
+}
+
 auto JoinOperator::apply(Response&& record, int slot, Collector& collector) -> void {
 #ifdef SAGEFLOW_ENABLE_METRICS
     // 统计 apply 处理总耗时（一次调用一次计数）
@@ -525,48 +614,73 @@ auto JoinOperator::apply(Response&& record, int slot, Collector& collector) -> v
       return;
     }
 
-    auto candidates = getCandidates(data_ptr, slot);
+    // Critical fix for single-instance concurrency:
+    // When triggered, acquire BOTH window locks before getting candidates and executing join
+    // This prevents the opposite slot from expiring records while we're computing the join
+    std::vector<std::pair<int, std::unique_ptr<VectorRecord>>> local_return_pool;
     size_t left_sz = 0, right_sz = 0;
-    {
-        std::shared_lock<std::shared_mutex> lkL(left_records_mutex_);
-        left_sz = left_records_.size();
-    }
-    {
-        std::shared_lock<std::shared_mutex> lkR(right_records_mutex_);
-        right_sz = right_records_.size();
-    }
+    
+    // Acquire both locks in consistent order (left first, then right) to avoid deadlock
+#ifdef SAGEFLOW_ENABLE_METRICS
+    uint64_t before_lock_L = ScopedAccumulateAtomic::now_ns();
+#endif
+    std::shared_lock<std::shared_mutex> lkL(left_records_mutex_);
+#ifdef SAGEFLOW_ENABLE_METRICS
+    JoinMetrics::instance().lock_wait_ns.fetch_add(ScopedAccumulateAtomic::now_ns() - before_lock_L, std::memory_order_relaxed);
+    uint64_t before_lock_R = ScopedAccumulateAtomic::now_ns();
+#endif
+    std::shared_lock<std::shared_mutex> lkR(right_records_mutex_);
+#ifdef SAGEFLOW_ENABLE_METRICS
+    JoinMetrics::instance().lock_wait_ns.fetch_add(ScopedAccumulateAtomic::now_ns() - before_lock_R, std::memory_order_relaxed);
+#endif
+    
+    // Now holding both locks, get window sizes and candidates safely
+    left_sz = left_records_.size();
+    right_sz = right_records_.size();
+    
+    auto candidates = getCandidatesWithLocksHeld(data_ptr, slot);
+    
     SAGEFLOW_LOG_DEBUG("JOIN_APPLY", "slot={} cand={} left_win={} right_win={} eager={} use_index={} ",
            slot, candidates.size(), left_sz, right_sz, (is_eager_?1:0), (use_index_?1:0));
-    std::vector<std::pair<int, std::unique_ptr<VectorRecord>>> local_return_pool;
 
     if (is_eager_) {
-        executeJoinForCandidates(candidates, data_ptr, slot, local_return_pool);
+        // Execute join while holding both locks to ensure consistency
+        executeJoinForCandidatesWithLockHeld(candidates, data_ptr, slot, 
+                                              slot == left_slot_id_ ? right_records_ : left_records_,
+                                              local_return_pool);
     } else {
-        executeLazyJoin(candidates, slot, local_return_pool);
-    // 清理窗口前加锁等待计入 lock_wait 与 window_insert_ns（视为窗口阶段的一部分）
+        executeLazyJoinWithLocksHeld(candidates, slot, local_return_pool);
+        // Release locks before clearing for lazy mode
+        lkL.unlock();
+        lkR.unlock();
+        
+        // 清理窗口前加锁等待计入 lock_wait 与 window_insert_ns（视为窗口阶段的一部分）
 #ifdef SAGEFLOW_ENABLE_METRICS
-    uint64_t before_wait_L = ScopedAccumulateAtomic::now_ns();
+        uint64_t before_wait_L = ScopedAccumulateAtomic::now_ns();
 #endif
-    std::unique_lock<std::shared_mutex> lkL(left_records_mutex_);
+        std::unique_lock<std::shared_mutex> wlkL(left_records_mutex_);
 #ifdef SAGEFLOW_ENABLE_METRICS
-    {
-        uint64_t waited = ScopedAccumulateAtomic::now_ns() - before_wait_L;
-        JoinMetrics::instance().lock_wait_ns.fetch_add(waited, std::memory_order_relaxed);
-        JoinMetrics::instance().window_insert_ns.fetch_add(waited, std::memory_order_relaxed);
-    }
-    uint64_t before_wait_R = ScopedAccumulateAtomic::now_ns();
+        {
+            uint64_t waited = ScopedAccumulateAtomic::now_ns() - before_wait_L;
+            JoinMetrics::instance().lock_wait_ns.fetch_add(waited, std::memory_order_relaxed);
+            JoinMetrics::instance().window_insert_ns.fetch_add(waited, std::memory_order_relaxed);
+        }
+        uint64_t before_wait_R = ScopedAccumulateAtomic::now_ns();
 #endif
-    std::unique_lock<std::shared_mutex> lkR(right_records_mutex_);
+        std::unique_lock<std::shared_mutex> wlkR(right_records_mutex_);
 #ifdef SAGEFLOW_ENABLE_METRICS
-    {
-        uint64_t waited = ScopedAccumulateAtomic::now_ns() - before_wait_R;
-        JoinMetrics::instance().lock_wait_ns.fetch_add(waited, std::memory_order_relaxed);
-        JoinMetrics::instance().window_insert_ns.fetch_add(waited, std::memory_order_relaxed);
-    }
+        {
+            uint64_t waited = ScopedAccumulateAtomic::now_ns() - before_wait_R;
+            JoinMetrics::instance().lock_wait_ns.fetch_add(waited, std::memory_order_relaxed);
+            JoinMetrics::instance().window_insert_ns.fetch_add(waited, std::memory_order_relaxed);
+        }
 #endif
         left_records_.clear();
         right_records_.clear();
     }
+    
+    // Locks released here automatically when going out of scope
+    
 #ifdef SAGEFLOW_ENABLE_METRICS
     {
         ScopedTimerAtomic t_emit(JoinMetrics::instance().emit_ns);
