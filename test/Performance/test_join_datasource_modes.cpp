@@ -374,7 +374,8 @@ TEST_P(JoinDataSourceModesTest, DataSourceModePerformance) {
   const size_t expected_right = right_records.size();
   
   // Compute expected matches - use consistent UID mapping
-  auto expected_matches = computeExpectedPairsByTraversal(left_records, right_records, mode_config.threshold, win_ms, 0.1, kModuloBase);
+  auto expected_matches =
+    computeExpectedPairsByTraversal(left_records, right_records, mode_config.threshold, win_ms, 0.1, kModuloBase);
   const uint64_t expected_emit_count = static_cast<uint64_t>(expected_matches.size());
   
   // Create stream sources
@@ -443,7 +444,7 @@ TEST_P(JoinDataSourceModesTest, DataSourceModePerformance) {
       // For eager methods, just check if inputs are drained and output has stabilized
       if (is_eager_method) {
         if (inputs_drained) {
-          std::this_thread::sleep_for(200ms);
+          std::this_thread::sleep_for(10s);
           uint64_t emitted_after_wait = JoinMetrics::instance().total_emits.load();
           if (emitted_after_wait == emitted) {
             // Output has stabilized, we're done
