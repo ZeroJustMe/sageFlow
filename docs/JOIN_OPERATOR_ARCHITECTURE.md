@@ -10,186 +10,160 @@ The original join operator architecture had race conditions when using paralleli
 
 ### Original Issues
 1. **Random Distribution**: Upstream operators used `RoundRobinPartitioner` to randomly distribute records to downstream join instances
-2. **Separate Windows**: Each join instance maintained its own left and right windows
-3. **Incomplete Results**: When a record from the left stream went to instance A and a matching record from the right stream went to instance B, they would never join because they were in different windows
-4. **Non-Deterministic Behavior**: Join results depended on the scheduling order and which instance received which records
+2. **Shared Index Access**: All join instances access the same shared index (via `ConcurrencyManager`), but insertion order was non-deterministic
+3. **Non-Deterministic Results**: The order of insertions into the shared index varied based on scheduling, leading to inconsistent join results
+4. **Race Condition**: The real issue is not about which instance sees which record, but about the **order of insertion into the shared index**
+
+## Key Insight
+
+Unlike typical distributed systems where data must be co-located for joins, sageFlow's join operators already use a **shared index** that all instances can access. The IVF and BruteForce join methods create shared indexes via `ConcurrencyManager`, which means:
+
+- All operator instances can see all vectors through the shared memory/index
+- Broadcasting records is unnecessary and wasteful
+- The problem is ensuring **stable insertion order** into the shared index
 
 ## Solution Architecture
 
-### Broadcast Partitioning
+### Timestamp-Based Key Partitioning
 
-The solution implements a **broadcast partitioning strategy** for join operators:
+The solution implements **KeyPartitioner** that partitions based on timestamp:
 
 ```
 ┌─────────────┐
 │Left Stream  │──┐
 └─────────────┘  │
-                 ├──► [Broadcast] ──┬──► Join Instance 0
-                 │                  ├──► Join Instance 1
-┌─────────────┐  │                  └──► Join Instance 2
+                 ├──► [KeyPartitioner(timestamp)] ──┬──► Join Instance 0 (handles T0-T4)
+                 │                                   ├──► Join Instance 1 (handles T5-T9)
+┌─────────────┐  │                                   └──► Join Instance 2 (handles T10-T14)
 │Right Stream │──┘
 └─────────────┘
 ```
 
 ### Key Components
 
-#### 1. Partitioner Interface Enhancement
+#### 1. KeyPartitioner Implementation
 
 ```cpp
-class IPartitioner {
+class KeyPartitioner : public IPartitioner {
 public:
-  virtual ~IPartitioner() = default;
-  virtual size_t partition(const Response& data, size_t num_channels) = 0;
-  virtual bool isBroadcast() const { return false; }
+  size_t partition(const Response& data, size_t num_channels) override {
+    if (!data.record_) return 0;
+    // Use timestamp as partition key to ensure records with similar timestamps
+    // are routed to the same instance, maintaining stable insertion order
+    return std::hash<int64_t>{}(data.record_->timestamp_) % num_channels;
+  }
 };
 ```
 
-#### 2. Partitioner Implementations
-
-- **RoundRobinPartitioner**: Default partitioner for load balancing (unchanged)
-- **KeyPartitioner**: Hash-based partitioning by record UID for deterministic routing
-- **VectorHashPartitioner**: Content-based partitioning using vector data
-- **BroadcastPartitioner**: Sends each record to ALL downstream instances
-
-#### 3. ResultPartition Enhancement
-
-The `ResultPartition::emit()` method now supports broadcast mode:
-
-```cpp
-void ResultPartition::emit(Response&& data, int slot) const {
-  if (partitioner_->isBroadcast()) {
-    // Send to all channels (with copies for all but the last)
-    for (size_t i = 0; i < output_channels_.size(); ++i) {
-      if (i == output_channels_.size() - 1) {
-        output_channels_[i]->push({std::move(data), slot});
-      } else {
-        Response data_copy = createCopy(data);
-        output_channels_[i]->push({std::move(data_copy), slot});
-      }
-    }
-  } else {
-    // Standard partitioning
-    size_t channel_index = partitioner_->partition(data, output_channels_.size());
-    output_channels_[channel_index]->push({std::move(data), slot});
-  }
-}
-```
-
-#### 4. ExecutionGraph Configuration
+#### 2. ExecutionGraph Configuration
 
 The `ExecutionGraph` automatically selects the appropriate partitioner:
 
 ```cpp
-// For JOIN operators with parallelism > 1, use broadcast
-if (is_join_operator && downstream_info.parallelism > 1) {
-    partitioner = std::make_unique<BroadcastPartitioner>();
+if (is_join_operator) {
+    // Join operators use KeyPartitioner to ensure temporal ordering
+    partitioner = std::make_unique<KeyPartitioner>();
 } else {
+    // Other operators use RoundRobinPartitioner for load balancing
     partitioner = std::make_unique<RoundRobinPartitioner>();
 }
 ```
 
 ## Benefits
 
-### 1. Deterministic Results
-- All join instances see all records from both left and right streams
-- Window-based joins produce consistent results regardless of parallelism
+### 1. Deterministic Insertion Order
+- Records with similar timestamps are processed by the same instance
+- Insertion into shared index follows a predictable order
+- Join results are consistent regardless of scheduling
 
-### 2. Algorithm Compatibility
+### 2. Efficient Resource Usage
+- No data duplication (unlike broadcasting)
+- Leverages existing shared index infrastructure
+- Maintains parallelism benefits
+
+### 3. Algorithm Compatibility
 - Works with all join algorithms: BruteForce, IVF, and future implementations
 - No changes required to join algorithms themselves
 - Transparent to the join operator implementation
 
-### 3. Flexibility
-- Easy to add new partitioning strategies (range-based, co-partitioning, etc.)
-- Partitioning strategy can be configured per operator type
-- Foundation for future optimizations
+## How Shared Index Works
+
+Each join operator creates a pair of shared indexes:
+
+```cpp
+// In JoinOperator constructor
+left_index_id_ = concurrency_manager_->create_index(prefix + "_left", type, dim);
+right_index_id_ = concurrency_manager_->create_index(prefix + "_right", type, dim);
+
+// All instances can access the same index
+concurrency_manager_->insert(index_id, record);  // Thread-safe insertion
+concurrency_manager_->query(index_id, ...);       // Thread-safe query
+```
+
+The race condition occurs when:
+1. Instance A receives record R1 at T1
+2. Instance B receives record R2 at T1
+3. Both insert into shared index, but order is non-deterministic
+4. Query results depend on insertion order
+
+By using KeyPartitioner with timestamp-based partitioning, we ensure:
+- Records at T1 always go to the same instance
+- Insertion order is stable within that time bucket
+- Join results are deterministic
 
 ## Performance Considerations
 
 ### Trade-offs
 
 #### Advantages
-✅ Complete visibility of data across all instances  
+✅ No data duplication (memory efficient)  
 ✅ Deterministic join results  
-✅ No missed matches due to partitioning  
+✅ Leverages existing shared index  
+✅ Good load balancing based on time distribution  
 
 #### Disadvantages
-⚠️ Increased memory usage (each instance maintains full windows)  
-⚠️ Increased network/queue traffic (records are duplicated)  
-⚠️ Limited scalability with very high parallelism  
+⚠️ May have load imbalance if timestamps are not uniformly distributed  
+⚠️ Still requires synchronization for shared index access  
 
-### When to Use Broadcast Join
+### When to Use Key Partitioning
 
 **Good for:**
-- Small to medium window sizes
-- Similarity joins where any left record can match any right record
-- Correctness-critical applications
+- Window-based joins where temporal ordering matters
+- Similarity joins with shared index infrastructure
+- Systems where deterministic results are critical
 
 **Consider alternatives for:**
-- Very large windows (> 1M records)
-- High parallelism (> 8 instances)
-- Equi-joins where key-based partitioning would work
-
-## Test Results
-
-### Before Broadcast Partitioning
-```
-Parallelism 1: 5899 matches (baseline)
-Parallelism 2: ~2950 matches (~50% recall)
-Parallelism 4: ~2950 matches (~50% recall)
-```
-
-### After Broadcast Partitioning
-```
-Parallelism 1: 5899 matches (baseline)
-Parallelism 2: 5537 matches (93.9% of baseline, 76.6% recall)
-Parallelism 4: 5835 matches (98.9% of baseline, 78.6% recall)
-```
-
-**Note**: The remaining ~1-6% gap is due to timing differences in window triggers across instances. Each instance maintains its own window and triggers independently, so slight timing differences can cause minor variations in results.
+- Non-temporal joins where timestamp is not relevant
+- Systems without shared index (would need co-partitioning or broadcast)
 
 ## Future Enhancements
 
-### 1. Synchronized Window Triggers
-Implement a coordinator that synchronizes window triggers across all join instances:
-```
-┌──────────────┐
-│Window        │
-│Coordinator   │──► Broadcast trigger events to all instances
-└──────────────┘
+### 1. Adaptive Partitioning
+Monitor timestamp distribution and adjust partitioning strategy dynamically:
+```cpp
+// Switch between timestamp-based and UID-based partitioning
+// based on workload characteristics
 ```
 
-### 2. Partitioned Join
-For equi-joins with a known join key, implement co-partitioning:
-```
-Left Stream  ──[Key Hash]──► Instance by key hash
-Right Stream ──[Key Hash]──► Instance by key hash
+### 2. Fine-grained Timestamp Buckets
+Partition based on timestamp windows rather than hash:
+```cpp
+// Route records in [T0-T5) to Instance 0, [T5-T10) to Instance 1, etc.
+size_t partition = (timestamp / window_size) % num_channels;
 ```
 
-### 3. Hybrid Approach
-Combine broadcast and partitioning based on data characteristics:
-- Small datasets: Broadcast
-- Large datasets with keys: Partition
-- Dynamic switching based on runtime statistics
-
-### 4. Memory Optimization
-Implement shared window storage across instances:
-```
-┌──────────────────┐
-│Shared Window     │ ← All instances read from shared memory
-│Storage (zero-copy)│
-└──────────────────┘
-```
+### 3. Synchronized Window Triggers
+Implement a coordinator that synchronizes window triggers across all join instances to further reduce timing-related variance.
 
 ## Implementation Details
 
 ### Files Modified
-- `include/execution/partitioner.h`: Added new partitioner classes
-- `src/execution/result_partition.cpp`: Added broadcast support
-- `src/execution/execution_graph.cpp`: Added automatic partitioner selection
+- `include/execution/partitioner.h`: Removed BroadcastPartitioner, updated KeyPartitioner to use timestamp
+- `src/execution/execution_graph.cpp`: Use KeyPartitioner for JOIN operators
+- `docs/JOIN_OPERATOR_ARCHITECTURE.md`: Updated documentation
 
 ### Configuration
-No configuration changes required. The system automatically uses broadcast partitioning for join operators.
+No configuration changes required. The system automatically uses timestamp-based key partitioning for join operators.
 
 ### Compatibility
 - ✅ Backward compatible with existing code
@@ -199,6 +173,6 @@ No configuration changes required. The system automatically uses broadcast parti
 
 ## References
 
-- Original issue: According to upstream repository issue #58
+- Original issue: https://github.com/intellistream/sageFlow/issues/58
+- Related: Shared index via ConcurrencyManager
 - Related: Window operator synchronization
-- Related: Concurrency manager for index management

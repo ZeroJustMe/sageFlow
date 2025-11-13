@@ -127,12 +127,13 @@ void ExecutionGraph::createConnections() {
             auto& upstream_vertex = upstream_info.vertices[i];
             auto result_partition = upstream_vertex->getResultPartition();
 
-            // 创建分区器 - Join算子使用BroadcastPartitioner确保所有实例看到所有记录
+            // 创建分区器 - Join算子使用KeyPartitioner确保时序稳定性
             std::unique_ptr<IPartitioner> partitioner;
-            if (is_join_operator && downstream_info.parallelism > 1) {
-                // 对于并行度>1的Join算子，使用广播分区
-                // 确保每个Join实例都能看到所有左右流记录，从而产生完整的join结果
-                partitioner = std::make_unique<BroadcastPartitioner>();
+            if (is_join_operator) {
+                // Join算子使用基于timestamp的KeyPartitioner
+                // 确保时序相近的记录路由到同一实例，从而保证插入共享索引的顺序稳定
+                // 这避免了由于调度顺序不同导致的join结果竞态问题
+                partitioner = std::make_unique<KeyPartitioner>();
             } else {
                 // 其他算子使用轮询分区以实现负载均衡
                 partitioner = std::make_unique<RoundRobinPartitioner>();

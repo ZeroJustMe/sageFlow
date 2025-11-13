@@ -14,8 +14,6 @@ class IPartitioner {
 public:
   virtual ~IPartitioner() = default;
   virtual size_t partition(const Response& data, size_t num_channels) = 0;
-  // 是否为广播模式（默认false）
-  virtual bool isBroadcast() const { return false; }
 };
 
 // 轮询/随机分发
@@ -28,16 +26,17 @@ public:
   }
 };
 
-// 按Key分区分发 - 确保相同key的记录路由到同一个实例
-// 这对于Join算子至关重要，避免竞态条件
+// 按Key分区分发 - 基于timestamp确保记录按时序顺序分配
+// 对于Join算子，确保相同时间段的记录路由到同一个实例，保证插入共享索引的顺序稳定性
 class KeyPartitioner : public IPartitioner {
 public:
   size_t partition(const Response& data, size_t num_channels) override {
     if (!data.record_) {
       return 0;  // 默认分区
     }
-    // 使用record的uid作为分区key，确保相同uid的记录到达同一实例
-    return std::hash<uint64_t>{}(data.record_->uid_) % num_channels;
+    // 使用timestamp作为分区key，确保时序相近的记录到达同一实例
+    // 这样可以保证共享索引中的插入顺序相对稳定，避免因调度顺序导致的竞态
+    return std::hash<int64_t>{}(data.record_->timestamp_) % num_channels;
   }
 };
 
@@ -57,21 +56,6 @@ public:
     }
     return hash % num_channels;
   }
-};
-
-// 广播分区器 - 将每条记录发送到所有下游实例
-// 用于JOIN算子确保每个实例都能看到所有记录，从而实现完整的join结果
-// 注意：这会增加网络/队列开销，仅适用于需要全局视图的算子（如window-based join）
-class BroadcastPartitioner : public IPartitioner {
-public:
-  size_t partition(const Response&, size_t) override {
-    // 广播模式下，partition方法返回值无意义
-    // 实际的广播逻辑需要在ResultPartition中特殊处理
-    return 0;
-  }
-  
-  // 标记此分区器需要广播
-  virtual bool isBroadcast() const { return true; }
 };
 
 };

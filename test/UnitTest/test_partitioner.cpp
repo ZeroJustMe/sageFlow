@@ -10,37 +10,47 @@
 namespace sageFlow {
 namespace test {
 
-// Test that BroadcastPartitioner properly identifies as broadcast
-TEST(PartitionerTest, BroadcastPartitionerIdentification) {
-    auto broadcast = std::make_unique<BroadcastPartitioner>();
-    EXPECT_TRUE(broadcast->isBroadcast());
-    
-    auto roundrobin = std::make_unique<RoundRobinPartitioner>();
-    EXPECT_FALSE(roundrobin->isBroadcast());
-    
-    auto key = std::make_unique<KeyPartitioner>();
-    EXPECT_FALSE(key->isBroadcast());
-}
-
-// Test that KeyPartitioner produces consistent hashing
-TEST(PartitionerTest, KeyPartitionerConsistency) {
+// Test that KeyPartitioner uses timestamp for consistent hashing
+TEST(PartitionerTest, KeyPartitionerTimestampBased) {
     KeyPartitioner partitioner;
     
-    // Create test record
+    // Create test records with same timestamp
     std::vector<float> data = {1.0f, 2.0f, 3.0f};
-    auto record = createVectorRecord(12345, 1000, data);
-    Response response{ResponseType::Record, std::move(record)};
+    auto record1 = createVectorRecord(12345, 1000, data);
+    auto record2 = createVectorRecord(67890, 1000, data);  // Different UID, same timestamp
     
-    // Same UID should always map to same partition
-    size_t first_partition = partitioner.partition(response, 4);
-    
-    // Recreate with same UID
-    auto record2 = createVectorRecord(12345, 2000, data);
+    Response response1{ResponseType::Record, std::move(record1)};
     Response response2{ResponseType::Record, std::move(record2)};
     
-    size_t second_partition = partitioner.partition(response2, 4);
+    // Same timestamp should map to same partition
+    size_t partition1 = partitioner.partition(response1, 4);
+    size_t partition2 = partitioner.partition(response2, 4);
     
-    EXPECT_EQ(first_partition, second_partition);
+    EXPECT_EQ(partition1, partition2);
+}
+
+// Test that KeyPartitioner distributes different timestamps
+TEST(PartitionerTest, KeyPartitionerDifferentTimestamps) {
+    KeyPartitioner partitioner;
+    
+    std::vector<float> data = {1.0f, 2.0f, 3.0f};
+    std::vector<size_t> partitions;
+    
+    // Records with different timestamps should distribute across partitions
+    for (int i = 0; i < 100; ++i) {
+        auto record = createVectorRecord(i, 1000 + i * 10, data);
+        Response response{ResponseType::Record, std::move(record)};
+        partitions.push_back(partitioner.partition(response, 4));
+    }
+    
+    // Should use at least 2 of the 4 partitions (allowing for hash collisions)
+    std::set<size_t> unique_partitions(partitions.begin(), partitions.end());
+    EXPECT_GE(unique_partitions.size(), 2);
+    
+    // Verify partitions are valid
+    for (size_t p : partitions) {
+        EXPECT_LT(p, 4);
+    }
 }
 
 // Test that RoundRobinPartitioner distributes evenly
@@ -63,45 +73,6 @@ TEST(PartitionerTest, RoundRobinDistribution) {
     for (size_t count : counts) {
         EXPECT_EQ(count, 25);
     }
-}
-
-// Test broadcast functionality in ResultPartition
-TEST(ResultPartitionTest, BroadcastToAllChannels) {
-    ResultPartition partition;
-    
-    // Create multiple queues (store raw pointers for later access)
-    std::vector<std::shared_ptr<BlockingQueue>> raw_queues;
-    std::vector<QueuePtr> queues;
-    for (int i = 0; i < 3; ++i) {
-        auto queue = std::make_shared<BlockingQueue>(10);
-        raw_queues.push_back(queue);
-        queues.push_back(queue);
-    }
-    
-    // Setup with broadcast partitioner
-    auto broadcast = std::make_unique<BroadcastPartitioner>();
-    partition.setup(std::move(broadcast), std::move(queues), 0);
-    
-    // Emit a record
-    std::vector<float> data = {1.0f, 2.0f, 3.0f};
-    auto record = createVectorRecord(999, 1000, data);
-    Response response{ResponseType::Record, std::move(record)};
-    partition.emit(std::move(response), 0);
-    
-    // Verify all queues received the data
-    int received_count = 0;
-    for (size_t i = 0; i < 3; ++i) {
-        auto tagged = raw_queues[i]->pop();
-        if (tagged.has_value()) {
-            received_count++;
-            EXPECT_TRUE(tagged->response.record_ != nullptr);
-            EXPECT_EQ(tagged->response.record_->uid_, 999);
-            EXPECT_EQ(tagged->slot, 0);
-        }
-    }
-    
-    // All 3 queues should have received the broadcast
-    EXPECT_EQ(received_count, 3);
 }
 
 // Test standard partitioning in ResultPartition
