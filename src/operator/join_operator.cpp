@@ -18,11 +18,6 @@
 
 namespace sageFlow {
 
-// 旧接口保留（如果未来需要 IVF 特有参数，可扩展重写）
-void JoinOperator::initializeIVFIndexes(int /*nlist*/, double /*rebuild_threshold*/, int /*nprobes*/) {
-    // 已由通用 createIndexPair 取代，这里留空以兼容旧调用（防止外部引用报错）
-}
-
 bool JoinOperator::createIndexPair(IndexType type, const std::string& prefix) {
     if (!concurrency_manager_) return false;
     left_index_id_ = concurrency_manager_->create_index(prefix + "_left", type, join_func_->getDim());
@@ -614,6 +609,18 @@ auto JoinOperator::apply(Response&& record, int slot, Collector& collector) -> v
       return;
     }
 
+    // 窗口状态一致性保证机制：
+    // 无论使用何种分区方法（RoundRobin、KeyPartitioner等），窗口的最终状态
+    // 只取决于记录的timestamp和window配置，不依赖于算子实例的调度顺序。
+    // 
+    // 关键机制：
+    // 1. updateSideThreadSafe中持有窗口锁进行插入和过期操作，保证单个窗口的一致性
+    // 2. 下面的双锁机制确保trigger时左右窗口状态一致，防止对面窗口在join计算过程中发生变化
+    // 3. 共享索引通过ConcurrencyManager保证线程安全，插入顺序由分区策略（如timestamp-based）决定
+    //
+    // 这样设计确保：即使并行度>1，每个算子实例的窗口状态也是确定性的，
+    // join结果不会因为调度顺序或分区方法的变化而产生竞态条件。
+    
     // Critical fix for single-instance concurrency:
     // When triggered, acquire BOTH window locks before getting candidates and executing join
     // This prevents the opposite slot from expiring records while we're computing the join

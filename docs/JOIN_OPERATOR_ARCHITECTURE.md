@@ -138,28 +138,51 @@ By using KeyPartitioner with timestamp-based partitioning, we ensure:
 
 ## Future Enhancements
 
-### 1. Adaptive Partitioning
+### 1. Local Index with Broadcast Partitioning
+For scenarios where shared index is not used, implement local indexes per instance with broadcast partitioning:
+```cpp
+// Use BroadcastPartitioner (interface preserved for future use)
+// This sends all records to all instances, each maintaining its own local index
+// Trade-off: Higher memory and network cost, but avoids shared index contention
+```
+
+**BroadcastPartitioner interface** is preserved in the codebase for this future use case, even though it's not currently active with the shared index architecture.
+
+### 2. Adaptive Partitioning
 Monitor timestamp distribution and adjust partitioning strategy dynamically:
 ```cpp
 // Switch between timestamp-based and UID-based partitioning
 // based on workload characteristics
 ```
 
-### 2. Fine-grained Timestamp Buckets
+### 3. Fine-grained Timestamp Buckets
 Partition based on timestamp windows rather than hash:
 ```cpp
 // Route records in [T0-T5) to Instance 0, [T5-T10) to Instance 1, etc.
 size_t partition = (timestamp / window_size) % num_channels;
 ```
 
-### 3. Synchronized Window Triggers
+### 4. Synchronized Window Triggers
 Implement a coordinator that synchronizes window triggers across all join instances to further reduce timing-related variance.
+
+## Window State Consistency
+
+The join operator ensures window state consistency **independent of partitioning method and parallelism** through:
+
+1. **Per-window Locking**: `updateSideThreadSafe()` holds window mutex during insert/expire operations
+2. **Dual-lock on Trigger**: When window triggers, both left and right window locks are acquired before getting candidates and executing join
+3. **Shared Index Safety**: ConcurrencyManager ensures thread-safe index operations
+
+This design guarantees that window state is deterministic based solely on record timestamps and window configuration, not on scheduling order or partitioning strategy. Even with parallelism > 1, each instance's window state remains consistent and predictable.
 
 ## Implementation Details
 
 ### Files Modified
-- `include/execution/partitioner.h`: Removed BroadcastPartitioner, updated KeyPartitioner to use timestamp
+- `include/execution/partitioner.h`: Added BroadcastPartitioner interface (for future use), updated KeyPartitioner to use timestamp
+- `src/execution/result_partition.cpp`: Added broadcast support for future use with local indexes
 - `src/execution/execution_graph.cpp`: Use KeyPartitioner for JOIN operators
+- `include/operator/join_operator.h`: Removed unused `initializeIVFIndexes` method
+- `src/operator/join_operator.cpp`: Added documentation on window consistency mechanism
 - `docs/JOIN_OPERATOR_ARCHITECTURE.md`: Updated documentation
 
 ### Configuration

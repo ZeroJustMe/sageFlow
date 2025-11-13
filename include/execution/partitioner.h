@@ -14,6 +14,8 @@ class IPartitioner {
 public:
   virtual ~IPartitioner() = default;
   virtual size_t partition(const Response& data, size_t num_channels) = 0;
+  // 是否为广播模式（默认false），供ResultPartition检测使用
+  virtual bool isBroadcast() const { return false; }
 };
 
 // 轮询/随机分发
@@ -56,6 +58,21 @@ public:
     }
     return hash % num_channels;
   }
+};
+
+// 广播分区器 - 将每条记录发送到所有下游实例
+// 保留此接口供未来使用：当不使用共享索引而是在分区内使用局部索引时，需要广播分发
+// 注意：广播会增加网络/队列开销和内存使用，仅在必要时使用
+class BroadcastPartitioner : public IPartitioner {
+public:
+  size_t partition(const Response&, size_t) override {
+    // 广播模式下，partition方法返回值无意义
+    // 实际的广播逻辑需要在ResultPartition中特殊处理
+    return 0;
+  }
+  
+  // 标记此分区器需要广播（供ResultPartition检测使用）
+  virtual bool isBroadcast() const { return true; }
 };
 
 };
