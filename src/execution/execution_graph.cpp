@@ -127,16 +127,12 @@ void ExecutionGraph::createConnections() {
             auto& upstream_vertex = upstream_info.vertices[i];
             auto result_partition = upstream_vertex->getResultPartition();
 
-            // 创建分区器 - Join算子使用KeyPartitioner确保时序稳定性
+            // 创建分区器
             std::unique_ptr<IPartitioner> partitioner;
             if (is_join_operator) {
-                // Join算子使用基于timestamp的KeyPartitioner
-                // 确保时序相近的记录路由到同一实例，从而保证插入共享索引的顺序稳定
-                // 这避免了由于调度顺序不同导致的join结果竞态问题
-                partitioner = std::make_unique<KeyPartitioner>();
-            } else {
-                // 其他算子使用轮询分区以实现负载均衡
                 partitioner = std::make_unique<RoundRobinPartitioner>();
+            } else {
+                partitioner = std::make_unique<KeyPartitioner>();
             }
 
             // 设置输出通道
