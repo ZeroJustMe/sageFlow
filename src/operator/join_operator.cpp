@@ -381,53 +381,56 @@ void JoinOperator::executeJoinForCandidatesWithLockHeld(
     ScopedTimerAtomic t_similarity(JoinMetrics::instance().similarity_ns);
 #endif
     
-    // 修复窗口分片问题：不再验证候选项是否在本地窗口中
-    // 原因：共享索引包含所有实例的记录，但本地窗口只包含本实例的记录
-    // 如果验证本地窗口，会错过其他实例窗口中的记录，导致recall下降
-    // 解决方案：信任共享索引 - 如果候选项从共享索引返回，说明它在窗口范围内，无需额外验证
+    // IMPORTANT: Validation is necessary even in eager mode to filter out:
+    // 1. Expired records: Shared index may have records not yet expired from index but already expired from windows
+    // 2. Timing issues: Ensures candidates are actually in the current window state
+    // 
+    // NOTE: This causes window fragmentation in multi-instance scenarios where candidates from other
+    // instances' windows fail validation. This is a known trade-off - without validation we get
+    // incorrect joins with expired records.
     for (auto &cand : candidates) {
-        // 移除: if (validateCandidateInWindow(cand, opposite_window))
-        // 直接执行join，信任共享索引的窗口管理
-        std::unique_ptr<VectorRecord> left_copy;
-        std::unique_ptr<VectorRecord> right_copy;
-        
-        if (slot == 0) {
-            left_copy = std::make_unique<VectorRecord>(*data_ptr);
-            right_copy = std::make_unique<VectorRecord>(*cand);
-        } else {
-            left_copy = std::make_unique<VectorRecord>(*cand);
-            right_copy = std::make_unique<VectorRecord>(*data_ptr);
-        }
-        
-        uint64_t log_left_uid = left_copy->uid_;
-        uint64_t log_right_uid = right_copy->uid_;
-        Response lhs{ResponseType::Record, std::move(left_copy)};
-        Response rhs{ResponseType::Record, std::move(right_copy)};
-#ifdef SAGEFLOW_ENABLE_METRICS
-        {
-            ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
-#endif
-            try {
-                auto res = join_func_->Execute(lhs, rhs);
-                uint64_t result_uid = res.record_ ? res.record_->uid_ : 0;
-                if (res.record_) {
-                    local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
-                }
-                SAGEFLOW_LOG_DEBUG("JOIN_EXEC", "slot={} result_uid={} left_uid={} right_uid={} ",
-                               slot, result_uid, log_left_uid, log_right_uid);
-            } catch (const std::exception& e) {
-                SAGEFLOW_LOG_ERROR("JOIN_EXEC", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
-                                 slot,
-                                 (lhs.record_ ? lhs.record_->data_.dim_ : -1),
-                                 (rhs.record_ ? rhs.record_->data_.dim_ : -1),
-                                 (lhs.record_ ? lhs.record_->uid_ : 0),
-                                 (rhs.record_ ? rhs.record_->uid_ : 0),
-                                 e.what());
-                throw;
+        if (validateCandidateInWindow(cand, opposite_window)) {
+            std::unique_ptr<VectorRecord> left_copy;
+            std::unique_ptr<VectorRecord> right_copy;
+            
+            if (slot == 0) {
+                left_copy = std::make_unique<VectorRecord>(*data_ptr);
+                right_copy = std::make_unique<VectorRecord>(*cand);
+            } else {
+                left_copy = std::make_unique<VectorRecord>(*cand);
+                right_copy = std::make_unique<VectorRecord>(*data_ptr);
             }
+            
+            uint64_t log_left_uid = left_copy->uid_;
+            uint64_t log_right_uid = right_copy->uid_;
+            Response lhs{ResponseType::Record, std::move(left_copy)};
+            Response rhs{ResponseType::Record, std::move(right_copy)};
 #ifdef SAGEFLOW_ENABLE_METRICS
-        }
+            {
+                ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
 #endif
+                try {
+                    auto res = join_func_->Execute(lhs, rhs);
+                    uint64_t result_uid = res.record_ ? res.record_->uid_ : 0;
+                    if (res.record_) {
+                        local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
+                    }
+                    SAGEFLOW_LOG_DEBUG("JOIN_EXEC", "slot={} result_uid={} left_uid={} right_uid={} ",
+                                   slot, result_uid, log_left_uid, log_right_uid);
+                } catch (const std::exception& e) {
+                    SAGEFLOW_LOG_ERROR("JOIN_EXEC", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
+                                     slot,
+                                     (lhs.record_ ? lhs.record_->data_.dim_ : -1),
+                                     (rhs.record_ ? rhs.record_->data_.dim_ : -1),
+                                     (lhs.record_ ? lhs.record_->uid_ : 0),
+                                     (rhs.record_ ? rhs.record_->uid_ : 0),
+                                     e.what());
+                    throw;
+                }
+#ifdef SAGEFLOW_ENABLE_METRICS
+            }
+#endif
+        }
     }
 }
 
