@@ -532,32 +532,35 @@ void JoinOperator::executeLazyJoinWithLocksHeld(
 #ifdef SAGEFLOW_ENABLE_METRICS
     ScopedTimerAtomic t_similarity(JoinMetrics::instance().similarity_ns);
 #endif
-    // 修复窗口分片问题：不再验证候选项是否在本地窗口中
-    // 信任共享索引返回的候选项，直接执行join
+    // IMPORTANT: For lazy mode, we must keep validation to avoid Cartesian product explosion
+    // While validation against local window causes some window fragmentation, removing it entirely
+    // creates N×M join operations which causes severe performance degradation (timeouts).
+    // TODO: Find a better approach that avoids both fragmentation AND explosion
     if (slot == left_slot_id_) {
         for (auto &l : left_records_) {
             if (!l) continue;
             for (auto &cand : candidates) {
-                // 移除: if (validateCandidateInWindow(cand, right_records_))
-                auto left_copy = std::make_unique<VectorRecord>(*l);
-                auto right_copy = std::make_unique<VectorRecord>(*cand);
-                Response lhs{ResponseType::Record, std::move(left_copy)};
-                Response rhs{ResponseType::Record, std::move(right_copy)};
-                try {
+                if (validateCandidateInWindow(cand, right_records_)) {
+                    auto left_copy = std::make_unique<VectorRecord>(*l);
+                    auto right_copy = std::make_unique<VectorRecord>(*cand);
+                    Response lhs{ResponseType::Record, std::move(left_copy)};
+                    Response rhs{ResponseType::Record, std::move(right_copy)};
+                    try{
 #ifdef SAGEFLOW_ENABLE_METRICS
-                    ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
+                        ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
 #endif
-                    auto res = join_func_->Execute(lhs, rhs);
-                    if (res.record_) local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
-                } catch (const std::exception& e) {
-                    SAGEFLOW_LOG_ERROR("JOIN_LAZY", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
-                                     slot,
-                                     (lhs.record_ ? lhs.record_->data_.dim_ : -1),
-                                     (rhs.record_ ? rhs.record_->data_.dim_ : -1),
-                                     (lhs.record_ ? lhs.record_->uid_ : 0),
-                                     (rhs.record_ ? rhs.record_->uid_ : 0),
-                                     e.what());
-                    throw;
+                        auto res = join_func_->Execute(lhs, rhs);
+                        if (res.record_) local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
+                    } catch (const std::exception& e) {
+                        SAGEFLOW_LOG_ERROR("JOIN_LAZY", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
+                                         slot,
+                                         (lhs.record_ ? lhs.record_->data_.dim_ : -1),
+                                         (rhs.record_ ? rhs.record_->data_.dim_ : -1),
+                                         (lhs.record_ ? lhs.record_->uid_ : 0),
+                                         (rhs.record_ ? rhs.record_->uid_ : 0),
+                                         e.what());
+                        throw;
+                    }
                 }
             }
         }
@@ -565,26 +568,27 @@ void JoinOperator::executeLazyJoinWithLocksHeld(
         for (auto &r : right_records_) {
             if (!r) continue;
             for (auto &cand : candidates) {
-                // 移除: if (validateCandidateInWindow(cand, left_records_))
-                auto left_copy = std::make_unique<VectorRecord>(*cand);
-                auto right_copy = std::make_unique<VectorRecord>(*r);
-                Response lhs{ResponseType::Record, std::move(left_copy)};
-                Response rhs{ResponseType::Record, std::move(right_copy)};
-                try {
+                if (validateCandidateInWindow(cand, left_records_)) {
+                    auto left_copy = std::make_unique<VectorRecord>(*cand);
+                    auto right_copy = std::make_unique<VectorRecord>(*r);
+                    Response lhs{ResponseType::Record, std::move(left_copy)};
+                    Response rhs{ResponseType::Record, std::move(right_copy)};
+                    try {
 #ifdef SAGEFLOW_ENABLE_METRICS
-                    ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
+                        ScopedTimerAtomic t_joinF(JoinMetrics::instance().join_function_ns);
 #endif
-                    auto res = join_func_->Execute(lhs, rhs);
-                    if (res.record_) local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
-                } catch (const std::exception& e) {
-                    SAGEFLOW_LOG_ERROR("JOIN_LAZY", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
-                                     slot,
-                                     (lhs.record_ ? lhs.record_->data_.dim_ : -1),
-                                     (rhs.record_ ? rhs.record_->data_.dim_ : -1),
-                                     (lhs.record_ ? lhs.record_->uid_ : 0),
-                                     (rhs.record_ ? rhs.record_->uid_ : 0),
-                                     e.what());
-                    throw;
+                        auto res = join_func_->Execute(lhs, rhs);
+                        if (res.record_) local_return_pool.emplace_back(left_slot_id_, std::move(res.record_));
+                    } catch (const std::exception& e) {
+                        SAGEFLOW_LOG_ERROR("JOIN_LAZY", "slot={} left_dim={} right_dim={} left_uid={} right_uid={} what={} ",
+                                         slot,
+                                         (lhs.record_ ? lhs.record_->data_.dim_ : -1),
+                                         (rhs.record_ ? rhs.record_->data_.dim_ : -1),
+                                         (lhs.record_ ? lhs.record_->uid_ : 0),
+                                         (rhs.record_ ? rhs.record_->uid_ : 0),
+                                         e.what());
+                        throw;
+                    }
                 }
             }
         }
