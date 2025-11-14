@@ -96,4 +96,4 @@ docs/_build/
 # Uncomment if needed
 # data/generated/
 # examples/output/
-install/*_codeql_build_dir/
+install/*
