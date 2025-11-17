@@ -129,11 +129,7 @@ void ExecutionGraph::createConnections() {
 
             // 创建分区器
             std::unique_ptr<IPartitioner> partitioner;
-            if (is_join_operator) {
-                partitioner = std::make_unique<RoundRobinPartitioner>();
-            } else {
-                partitioner = std::make_unique<KeyPartitioner>();
-            }
+            partitioner = std::make_unique<RoundRobinPartitioner>();
 
             // 设置输出通道
             std::vector<QueuePtr> output_channels;
