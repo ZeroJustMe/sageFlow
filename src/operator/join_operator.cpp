@@ -5,6 +5,7 @@
 #include "operator/join_operator.h"
 #include "operator/join_operator_methods/join_methods.h"
 #include "operator/join_metrics.h"
+#include "utils/monitoring.h"
 
 #include <algorithm>
 #include <cassert>
@@ -40,15 +41,27 @@ static inline std::string to_lower_copy(std::string v) {
 JoinOperator::JoinOperator(std::unique_ptr<Function> &join_func,
                            const std::shared_ptr<ConcurrencyManager> &concurrency_manager,
                            const std::string& join_method_name_raw,
-                           double join_similarity_threshold)
+                           double join_similarity_threshold,
+                           bool enable_profiling,
+                           const std::string& profile_output_path)
     : Operator(OperatorType::JOIN), concurrency_manager_(concurrency_manager),
-      join_similarity_threshold_(join_similarity_threshold) {
+      join_similarity_threshold_(join_similarity_threshold),
+      enable_profiling_(enable_profiling) {
     join_func_ = std::unique_ptr<JoinFunction>(dynamic_cast<JoinFunction*>(join_func.release()));
     if (!join_func_) {
         throw std::runtime_error("JoinOperator: join_func is not a JoinFunction");
     }
     if (!concurrency_manager_) {
         throw std::runtime_error("JoinOperator: concurrency_manager is a nullptr");
+    }
+
+    // Initialize GPERFTOOLS profiler if enabled
+    if (enable_profiling_) {
+        std::string profile_path = profile_output_path.empty() 
+            ? "profiles/join_operator_profile.prof" 
+            : profile_output_path;
+        profiler_ = std::make_unique<PerformanceMonitor>(profile_path);
+        SAGEFLOW_LOG_INFO("JOIN", "GPERFTOOLS profiling enabled output={}", profile_path);
     }
 
     std::string join_method_name = to_lower_copy(join_method_name_raw);
@@ -121,9 +134,23 @@ JoinOperator::JoinOperator(std::unique_ptr<Function> &join_func,
     }
 }
 
+JoinOperator::~JoinOperator() {
+    // Stop profiling if it was enabled
+    if (profiler_) {
+        profiler_->StopProfiling();
+        SAGEFLOW_LOG_INFO("JOIN", "GPERFTOOLS profiling stopped");
+    }
+}
+
 void JoinOperator::open() {
   if (is_open_) return;
   is_open_ = true;
+  
+  // Start profiling when operator opens
+  if (profiler_) {
+      profiler_->StartProfiling();
+      SAGEFLOW_LOG_INFO("JOIN", "GPERFTOOLS profiling started");
+  }
 }
 
 auto JoinOperator::updateSideThreadSafe(

@@ -283,3 +283,113 @@ pprof --pdf ./your_binary profile.prof > callgraph.pdf
 # Focus on specific function
 pprof --focus=FunctionName --text ./your_binary profile.prof
 ```
+
+## Join Operator GPERFTOOLS Integration
+
+### Configuration
+
+The Join Operator supports built-in GPERFTOOLS profiling that can be enabled via configuration:
+
+**In `config/join_config.toml`:**
+```toml
+# GPERFTOOLS Profiling (requires ENABLE_GPERFTOOLS=ON during build)
+enableProfiling = true
+profileOutputPath = "profiles/join_operator_profile.prof"
+```
+
+**Parameters:**
+- `enableProfiling`: Set to `true` to enable CPU profiling
+- `profileOutputPath`: Path where profile data will be saved (default: `profiles/join_operator_profile.prof`)
+
+### How It Works
+
+When profiling is enabled:
+1. **Initialization**: Profiler is created when JoinOperator is constructed
+2. **Start**: Profiling starts when `open()` is called (operator becomes active)
+3. **Stop**: Profiling stops when the operator is destroyed (pipeline completion)
+
+This captures the complete execution profile of the join operator including:
+- Window management operations
+- Index operations (IVF/BruteForce)
+- Similarity computations
+- Join function execution
+- Lock wait times
+
+### Using the Profile Data
+
+After running with profiling enabled:
+
+```bash
+# Generate text report of top functions
+pprof --text ./build/bin/your_test profiles/join_operator_profile.prof
+
+# Generate call graph (requires graphviz)
+pprof --pdf ./build/bin/your_test profiles/join_operator_profile.prof > join_callgraph.pdf
+
+# Interactive web view
+pprof --web ./build/bin/your_test profiles/join_operator_profile.prof
+
+# Focus on specific functions
+pprof --focus=JoinOperator --text ./build/bin/your_test profiles/join_operator_profile.prof
+```
+
+### Build Requirements
+
+GPERFTOOLS profiling requires the following:
+
+1. **Build with GPERFTOOLS enabled:**
+   ```bash
+   cmake -DENABLE_GPERFTOOLS=ON ..
+   make
+   ```
+
+2. **Install gperftools** (if not already installed):
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install google-perftools libgoogle-perftools-dev
+   
+   # macOS
+   brew install gperftools
+   ```
+
+3. **Install pprof analysis tools:**
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install google-perftools
+   
+   # Or use Go version
+   go install github.com/google/pprof@latest
+   ```
+
+### Example Workflow
+
+1. **Enable profiling in config:**
+   ```toml
+   enableProfiling = true
+   profileOutputPath = "profiles/join_perf.prof"
+   ```
+
+2. **Run your test/application:**
+   ```bash
+   ./build/bin/your_test
+   ```
+
+3. **Analyze the results:**
+   ```bash
+   # See top CPU consumers
+   pprof --text ./build/bin/your_test profiles/join_perf.prof
+   
+   # Generate visual call graph
+   pprof --pdf ./build/bin/your_test profiles/join_perf.prof > analysis.pdf
+   ```
+
+4. **Optimize based on findings** and repeat
+
+### Best Practices
+
+- **Development**: Enable profiling to identify bottlenecks during development
+- **Testing**: Profile specific test scenarios to understand performance characteristics
+- **Production**: Disable profiling (set `enableProfiling = false`) to avoid overhead
+- **Output Path**: Use descriptive names like `profiles/join_ivf_eager_profile.prof` to distinguish different configurations
+- **Combine with Metrics**: Use fine-grained metrics for continuous monitoring, GPERFTOOLS for deep analysis
+
