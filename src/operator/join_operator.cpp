@@ -144,9 +144,9 @@ auto JoinOperator::updateSideThreadSafe(
     metrics_record_lock_wait_dual(before_lock, JoinMetrics::instance().window_insert_ns);
     
     if (slot == 0) {
-      metrics_increment(JoinMetrics::instance().total_records_left);
+      JoinMetrics::instance().total_records_left.fetch_add(1, std::memory_order_relaxed);
     } else {
-      metrics_increment(JoinMetrics::instance().total_records_right);
+      JoinMetrics::instance().total_records_right.fetch_add(1, std::memory_order_relaxed);
     }
     // 窗口插入阶段（仅插入）
     {
@@ -189,9 +189,9 @@ auto JoinOperator::updateSideThreadSafe(
     }
     if (expired_count > 0) {
         if (slot == 0) {
-            metrics_increment(JoinMetrics::instance().window_records_left_completed, expired_count);
+            JoinMetrics::instance().window_records_left_completed.fetch_add(expired_count, std::memory_order_relaxed);
         } else {
-            metrics_increment(JoinMetrics::instance().window_records_right_completed, expired_count);
+            JoinMetrics::instance().window_records_right_completed.fetch_add(expired_count, std::memory_order_relaxed);
         }
     }
 
