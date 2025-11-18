@@ -1,116 +1,116 @@
 #pragma once
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <string>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
+
+// Include general metrics utilities
+#include "utils/metrics.h"
 
 namespace sageFlow {
+
+/**
+ * @brief Join operator-specific metrics container
+ * 
+ * This structure holds all performance metrics for the join operator.
+ * Metrics are accessible globally via the singleton instance() method.
+ */
 struct JoinMetrics {
-  std::atomic<uint64_t> window_insert_ns{0};
-  std::atomic<uint64_t> index_insert_ns{0};
-  std::atomic<uint64_t> expire_ns{0};
-  std::atomic<uint64_t> candidate_fetch_ns{0};
-  std::atomic<uint64_t> similarity_ns{0};
-  std::atomic<uint64_t> join_function_ns{0};
-  std::atomic<uint64_t> emit_ns{0};
-  std::atomic<uint64_t> lock_wait_ns{0};
-  std::atomic<uint64_t> total_records_left{0};
-  std::atomic<uint64_t> total_records_right{0};
-  std::atomic<uint64_t> total_emits{0};
-  std::atomic<uint64_t> window_records_left_completed{0};
-  std::atomic<uint64_t> window_records_right_completed{0};
+  // Timing metrics (in nanoseconds)
+  std::atomic<uint64_t> window_insert_ns{0};      ///< Time spent on window insert/expire operations
+  std::atomic<uint64_t> index_insert_ns{0};       ///< Time spent on index insert/delete operations
+  std::atomic<uint64_t> expire_ns{0};             ///< Time spent on expiration logic
+  std::atomic<uint64_t> candidate_fetch_ns{0};    ///< Time spent fetching join candidates
+  std::atomic<uint64_t> similarity_ns{0};         ///< Time spent on similarity computation
+  std::atomic<uint64_t> join_function_ns{0};      ///< Time spent executing join function
+  std::atomic<uint64_t> emit_ns{0};               ///< Time spent emitting results
+  std::atomic<uint64_t> lock_wait_ns{0};          ///< Time spent waiting for locks
+  
+  // Counter metrics
+  std::atomic<uint64_t> total_records_left{0};    ///< Total records processed on left side
+  std::atomic<uint64_t> total_records_right{0};   ///< Total records processed on right side
+  std::atomic<uint64_t> total_emits{0};           ///< Total results emitted
+  std::atomic<uint64_t> window_records_left_completed{0};   ///< Records expired from left window
+  std::atomic<uint64_t> window_records_right_completed{0};  ///< Records expired from right window
+  
+  // Apply processing metrics
+  std::atomic<uint64_t> apply_processing_ns{0};   ///< Total time in apply() method
+  std::atomic<uint64_t> apply_processing_count{0}; ///< Number of apply() calls
+  
+  // End-to-end latency metrics
+  std::atomic<uint64_t> e2e_latency_ns{0};        ///< Cumulative end-to-end latency
+  std::atomic<uint64_t> e2e_latency_count{0};     ///< Number of latency measurements
 
-  // 新增：apply 处理耗时与端到端延迟（单位：纳秒，均为累加值；另附计数）
-  std::atomic<uint64_t> apply_processing_ns{0};
-  std::atomic<uint64_t> apply_processing_count{0};
-  std::atomic<uint64_t> e2e_latency_ns{0};
-  std::atomic<uint64_t> e2e_latency_count{0};
-
+  /**
+   * @brief Get singleton instance of JoinMetrics
+   * @return Reference to the global JoinMetrics instance
+   */
   static JoinMetrics& instance() {
-    static JoinMetrics inst; return inst;
+    static JoinMetrics inst;
+    return inst;
   }
+  
+  /**
+   * @brief Reset all metrics to zero
+   */
   void reset() {
-    window_insert_ns = index_insert_ns = expire_ns = candidate_fetch_ns = similarity_ns = join_function_ns = emit_ns = lock_wait_ns = 0;
+    window_insert_ns = index_insert_ns = expire_ns = candidate_fetch_ns = similarity_ns = 
+      join_function_ns = emit_ns = lock_wait_ns = 0;
     total_records_left = total_records_right = total_emits = 0;
     window_records_left_completed = window_records_right_completed = 0;
     apply_processing_ns = apply_processing_count = e2e_latency_ns = e2e_latency_count = 0;
   }
+  
+  /**
+   * @brief Export metrics to TSV file
+   * @param path Output file path
+   */
   void dump_tsv(const std::string& path) {
-    std::error_code ec; std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
     std::ofstream ofs(path, std::ios::out | std::ios::trunc);
-    if(!ofs) return;
+    if (!ofs) return;
+    
     ofs << "metric\tvalue\n";
-#define EMIT(m) ofs<<#m"\t"<<m.load()<<"\n";
-    EMIT(window_insert_ns) EMIT(index_insert_ns) EMIT(expire_ns) EMIT(candidate_fetch_ns) EMIT(similarity_ns)
-    EMIT(join_function_ns) EMIT(emit_ns) EMIT(lock_wait_ns) EMIT(total_records_left) EMIT(total_records_right) EMIT(total_emits)
+#define EMIT(m) ofs << #m "\t" << m.load() << "\n";
+    EMIT(window_insert_ns) EMIT(index_insert_ns) EMIT(expire_ns) EMIT(candidate_fetch_ns)
+    EMIT(similarity_ns) EMIT(join_function_ns) EMIT(emit_ns) EMIT(lock_wait_ns)
+    EMIT(total_records_left) EMIT(total_records_right) EMIT(total_emits)
     EMIT(window_records_left_completed) EMIT(window_records_right_completed)
-    EMIT(apply_processing_ns) EMIT(apply_processing_count) EMIT(e2e_latency_ns) EMIT(e2e_latency_count)
+    EMIT(apply_processing_ns) EMIT(apply_processing_count)
+    EMIT(e2e_latency_ns) EMIT(e2e_latency_count)
 #undef EMIT
   }
 };
 
-class ScopedTimerAtomic {
- public:
-  using Clock = std::chrono::high_resolution_clock;
-  explicit ScopedTimerAtomic(std::atomic<uint64_t>& slot) : slot_(slot), start_(Clock::now()) {}
-  ~ScopedTimerAtomic() {
-    auto d = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-start_).count();
-    slot_.fetch_add(static_cast<uint64_t>(d), std::memory_order_relaxed);
-  }
- private:
-  std::atomic<uint64_t>& slot_;
-  Clock::time_point start_;
-};
-
-class ScopedAccumulateAtomic {
- public:
-  ScopedAccumulateAtomic(std::atomic<uint64_t>& slot, uint64_t start_ns) : slot_(slot), start_ns_(start_ns) {}
-  ~ScopedAccumulateAtomic() {
-    uint64_t end_ns = now_ns(); slot_.fetch_add(end_ns - start_ns_, std::memory_order_relaxed);
-  }
-  static uint64_t now_ns() {
-    return (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-  }
- private:
-  std::atomic<uint64_t>& slot_;
-  uint64_t start_ns_;
-};
-
 // ============================================================================
-// Metrics Helper Functions - Wrapper to hide #ifdef SAGEFLOW_ENABLE_METRICS
+// Join-Specific Metrics Helper Functions
 // ============================================================================
 
-// Helper to get current timestamp for lock wait tracking
-inline uint64_t metrics_timestamp() {
-#ifdef SAGEFLOW_ENABLE_METRICS
-  return ScopedAccumulateAtomic::now_ns();
-#else
-  return 0;
-#endif
-}
-
-// Helper to record lock wait time
+/**
+ * @brief Record lock wait time to the join operator's lock_wait_ns metric
+ * @param start_time Start timestamp from metrics_timestamp()
+ */
 inline void metrics_record_lock_wait(uint64_t start_time) {
 #ifdef SAGEFLOW_ENABLE_METRICS
   if (start_time > 0) {
-    JoinMetrics::instance().lock_wait_ns.fetch_add(
-      ScopedAccumulateAtomic::now_ns() - start_time, std::memory_order_relaxed);
+    metrics_record_elapsed(JoinMetrics::instance().lock_wait_ns, start_time);
   }
 #else
-  (void)start_time;  // Suppress unused parameter warning
+  (void)start_time;
 #endif
 }
 
-// Helper to record lock wait time and also add to another metric (e.g., window_insert_ns)
+/**
+ * @brief Record lock wait time to both lock_wait_ns and another metric
+ * @param start_time Start timestamp from metrics_timestamp()
+ * @param additional_metric Additional metric to update (e.g., window_insert_ns)
+ */
 inline void metrics_record_lock_wait_dual(uint64_t start_time, std::atomic<uint64_t>& additional_metric) {
 #ifdef SAGEFLOW_ENABLE_METRICS
   if (start_time > 0) {
-    uint64_t waited = ScopedAccumulateAtomic::now_ns() - start_time;
-    JoinMetrics::instance().lock_wait_ns.fetch_add(waited, std::memory_order_relaxed);
-    additional_metric.fetch_add(waited, std::memory_order_relaxed);
+    metrics_record_elapsed_dual(JoinMetrics::instance().lock_wait_ns, additional_metric, start_time);
   }
 #else
   (void)start_time;
@@ -118,17 +118,10 @@ inline void metrics_record_lock_wait_dual(uint64_t start_time, std::atomic<uint6
 #endif
 }
 
-// Helper to increment counter
-inline void metrics_increment(std::atomic<uint64_t>& counter, uint64_t value = 1) {
-#ifdef SAGEFLOW_ENABLE_METRICS
-  counter.fetch_add(value, std::memory_order_relaxed);
-#else
-  (void)counter;
-  (void)value;
-#endif
-}
-
-// Helper to record end-to-end latency
+/**
+ * @brief Record end-to-end latency for join operator
+ * @param start_time Start timestamp from metrics_timestamp()
+ */
 inline void metrics_record_e2e_latency(uint64_t start_time) {
 #ifdef SAGEFLOW_ENABLE_METRICS
   if (start_time > 0) {
@@ -140,17 +133,5 @@ inline void metrics_record_e2e_latency(uint64_t start_time) {
   (void)start_time;
 #endif
 }
-
-// RAII wrapper for scoped timing - no-op when metrics disabled
-class MetricsTimer {
- public:
-#ifdef SAGEFLOW_ENABLE_METRICS
-  explicit MetricsTimer(std::atomic<uint64_t>& slot) : timer_(slot) {}
- private:
-  ScopedTimerAtomic timer_;
-#else
-  explicit MetricsTimer(std::atomic<uint64_t>&) {}
-#endif
-};
 
 } // namespace sageFlow
