@@ -1,5 +1,0 @@
-if(EXISTS "/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_partitioner[1]_tests.cmake")
-  include("/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_partitioner[1]_tests.cmake")
-else()
-  add_test(test_partitioner_NOT_BUILT test_partitioner_NOT_BUILT)
-endif()

@@ -1,5 +1,0 @@
-if(EXISTS "/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_data_persistence[1]_tests.cmake")
-  include("/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_data_persistence[1]_tests.cmake")
-else()
-  add_test(test_data_persistence_NOT_BUILT test_data_persistence_NOT_BUILT)
-endif()

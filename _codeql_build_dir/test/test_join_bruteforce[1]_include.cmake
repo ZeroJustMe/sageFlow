@@ -1,5 +1,0 @@
-if(EXISTS "/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_join_bruteforce[1]_tests.cmake")
-  include("/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_join_bruteforce[1]_tests.cmake")
-else()
-  add_test(test_join_bruteforce_NOT_BUILT test_join_bruteforce_NOT_BUILT)
-endif()

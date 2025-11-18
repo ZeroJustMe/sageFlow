@@ -1,5 +1,0 @@
-if(EXISTS "/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_compute_engine[1]_tests.cmake")
-  include("/home/runner/work/sageFlow/sageFlow/_codeql_build_dir/test/test_compute_engine[1]_tests.cmake")
-else()
-  add_test(test_compute_engine_NOT_BUILT test_compute_engine_NOT_BUILT)
-endif()
