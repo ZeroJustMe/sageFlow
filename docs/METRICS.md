@@ -1,23 +1,57 @@
-# Metrics System Documentation
+# Metrics and Monitoring System Documentation
 
 ## Overview
 
-The sageFlow metrics system provides a reusable infrastructure for collecting performance metrics across all operators. The system is designed to be:
+The sageFlow metrics system provides comprehensive performance monitoring infrastructure using both:
 
-- **Zero-overhead when disabled**: All metrics code compiles to no-ops when `SAGEFLOW_ENABLE_METRICS` is not defined
-- **Thread-safe**: Uses atomic operations for concurrent access
-- **Extensible**: Easy to add new operator-specific metrics
+1. **GPERFTOOLS**: Detailed CPU and heap profiling for identifying bottlenecks
+2. **Fine-grained Metrics**: Real-time aggregated statistics with zero overhead when disabled
 
 ## Architecture
 
-### Core Infrastructure (`include/utils/metrics.h`)
+### Core Infrastructure (`include/utils/monitoring.h`)
 
-The general-purpose metrics utilities that can be used by any operator:
+Unified monitoring header that provides all performance monitoring tools:
 
-#### Classes
+#### GPERFTOOLS Integration
+
+**PerformanceMonitor** class provides access to gperftools profiling:
+
+- **CPU Profiling**: Identify performance hotspots and function call frequencies
+- **Heap Profiling**: Track memory allocations and find memory leaks (tcmalloc)
+- **Analysis**: Use `pprof` to generate reports from profile data
+
+Usage:
+```cpp
+#include "utils/monitoring.h"
+
+PerformanceMonitor monitor("my_profile.prof");
+monitor.StartProfiling();
+// ... code to profile ...
+monitor.StopProfiling();
+
+// Analyze with: pprof --text ./your_binary my_profile.prof
+// Or generate call graph: pprof --pdf ./your_binary my_profile.prof > profile.pdf
+```
+
+**What GPERFTOOLS can monitor:**
+- CPU time spent in each function (sampling-based)
+- Function call counts and call graph
+- Memory allocation patterns and sizes
+- Memory leaks and heap growth
+- Lock contention (with heap profiler extensions)
+
+**When to use GPERFTOOLS:**
+- Development and testing: Identify performance bottlenecks
+- One-time profiling runs to understand system behavior
+- Memory leak detection during long-running tests
+- Detailed call graph analysis
+
+#### Fine-Grained Metrics Classes
 
 **`ScopedTimerAtomic`**
 - RAII timer that measures elapsed time and adds it to an atomic counter
+- Use for measuring specific code sections
 - Usage:
   ```cpp
   std::atomic<uint64_t> my_timing_metric{0};
@@ -53,16 +87,22 @@ The general-purpose metrics utilities that can be used by any operator:
 
 #### Helper Functions
 
+All helpers are conditionally compiled based on `SAGEFLOW_ENABLE_METRICS`:
+
 - **`metrics_timestamp()`**: Get current timestamp (0 when metrics disabled)
 - **`metrics_record_elapsed(metric, start_time)`**: Record elapsed time to one metric
 - **`metrics_record_elapsed_dual(metric1, metric2, start_time)`**: Record to two metrics
 - **`metrics_increment(counter, value)`**: Increment a counter metric
 
-### Join Operator Metrics (`include/operator/join_metrics.h`)
+### Operator-Specific Metrics (`include/utils/metrics/`)
+
+Operator-specific metrics are organized under `utils/metrics/`:
+
+#### Join Operator Metrics (`include/utils/metrics/join_metrics.h`)
 
 Join-specific metrics implementation built on top of the core infrastructure:
 
-#### JoinMetrics Structure
+**JoinMetrics Structure**
 
 Singleton container for all join operator metrics:
 
@@ -83,23 +123,22 @@ Singleton container for all join operator metrics:
 - `apply_processing_count`: Number of apply() calls
 - `e2e_latency_ns/count`: End-to-end latency tracking
 
-#### Join-Specific Helpers
-
-- **`metrics_record_lock_wait(start_time)`**: Record to lock_wait_ns
-- **`metrics_record_lock_wait_dual(start_time, additional_metric)`**: Record to lock_wait_ns and another metric
-- **`metrics_record_e2e_latency(start_time)`**: Record end-to-end latency
+**Join-Specific Helpers**:
+- `metrics_record_lock_wait(start_time)`: Record to lock_wait_ns
+- `metrics_record_lock_wait_dual(start_time, additional_metric)`: Record to lock_wait_ns and another metric
+- `metrics_record_e2e_latency(start_time)`: Record end-to-end latency
 
 ## Adding Metrics to New Operators
 
 ### Step 1: Create Operator-Specific Metrics Header
 
-Create `include/operator/your_operator_metrics.h`:
+Create `include/utils/metrics/your_operator_metrics.h`:
 
 ```cpp
 #pragma once
 #include <atomic>
 #include <cstdint>
-#include "utils/metrics.h"
+#include "utils/monitoring.h"
 
 namespace sageFlow {
 
@@ -134,10 +173,17 @@ inline void your_operator_specific_helper(uint64_t start_time) {
 ### Step 2: Use Metrics in Your Operator
 
 ```cpp
-#include "operator/your_operator_metrics.h"
+#include "utils/metrics/your_operator_metrics.h"
+#include "utils/monitoring.h"  // For GPERFTOOLS if needed
 
 void YourOperator::process() {
-  // Use MetricsTimer for scoped timing
+  // Optional: Use GPERFTOOLS for detailed profiling (development/testing)
+  #ifdef ENABLE_GPERFTOOLS
+  PerformanceMonitor monitor("your_operator_profile.prof");
+  monitor.StartProfiling();
+  #endif
+  
+  // Use MetricsTimer for scoped timing (production monitoring)
   MetricsTimer timer(YourOperatorMetrics::instance().processing_ns);
   
   // Use metrics_increment for counters (always call, not conditional)
@@ -147,10 +193,27 @@ void YourOperator::process() {
   uint64_t start = metrics_timestamp();
   // ... work ...
   your_operator_specific_helper(start);
+  
+  #ifdef ENABLE_GPERFTOOLS
+  monitor.StopProfiling();
+  #endif
 }
 ```
 
-## Important Notes
+## Comparison: GPERFTOOLS vs Fine-Grained Metrics
+
+| Feature | GPERFTOOLS | Fine-Grained Metrics |
+|---------|-----------|---------------------|
+| **Use Case** | Development, debugging, one-time analysis | Production, continuous monitoring |
+| **Overhead** | ~1-5% CPU overhead | Zero when disabled, <0.1% when enabled |
+| **Granularity** | Function-level (sampling) | Code-block level (exact) |
+| **Output** | Profile files (.prof) | Real-time counters |
+| **Analysis** | Post-processing with pprof | Real-time or export to TSV |
+| **Call Graph** | Yes, detailed | No |
+| **Memory Profiling** | Yes (heap, leaks) | No |
+| **Always On** | No (development only) | Yes (production-safe) |
+
+## Best Practices
 
 ### Conditional vs Unconditional Metrics
 
@@ -162,6 +225,29 @@ void YourOperator::process() {
   - Use when tests or other code depends on the counter
   - Example: `metric.fetch_add(1, std::memory_order_relaxed)`
 
+### Combining GPERFTOOLS and Fine-Grained Metrics
+
+**Development Workflow:**
+1. Enable fine-grained metrics to identify problem areas
+2. Use GPERFTOOLS profiling for detailed analysis of hot spots
+3. Optimize based on both metrics
+4. Verify with fine-grained metrics in production
+
+**Example:**
+```cpp
+void critical_section() {
+  // Fine-grained metric (always on in production)
+  MetricsTimer timer(MyMetrics::instance().critical_section_ns);
+  
+  // GPERFTOOLS profiling (development only)
+  #ifdef ENABLE_GPERFTOOLS
+  // This section will show up in pprof call graph
+  #endif
+  
+  // ... critical code ...
+}
+```
+
 ### Thread Safety
 
 All metrics use `std::atomic` with `memory_order_relaxed` for:
@@ -171,6 +257,29 @@ All metrics use `std::atomic` with `memory_order_relaxed` for:
 
 Note: Relaxed ordering is sufficient because metrics don't synchronize program logic.
 
-## Examples
+## Example: Join Operator Integration
 
-See `src/operator/join_operator.cpp` for comprehensive examples of metrics usage in a production operator.
+See `src/operator/join_operator.cpp` for a comprehensive example showing:
+- GPERFTOOLS integration for detailed profiling
+- Fine-grained metrics for production monitoring
+- Lock wait tracking
+- End-to-end latency measurement
+- Counter metrics for pipeline health
+
+## Analyzing GPERFTOOLS Output
+
+After profiling with PerformanceMonitor:
+
+```bash
+# Text report showing top functions
+pprof --text ./your_binary profile.prof
+
+# Interactive web view
+pprof --web ./your_binary profile.prof
+
+# Generate PDF call graph
+pprof --pdf ./your_binary profile.prof > callgraph.pdf
+
+# Focus on specific function
+pprof --focus=FunctionName --text ./your_binary profile.prof
+```
