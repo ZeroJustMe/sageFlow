@@ -79,4 +79,78 @@ class ScopedAccumulateAtomic {
   uint64_t start_ns_;
 };
 
+// ============================================================================
+// Metrics Helper Functions - Wrapper to hide #ifdef SAGEFLOW_ENABLE_METRICS
+// ============================================================================
+
+// Helper to get current timestamp for lock wait tracking
+inline uint64_t metrics_timestamp() {
+#ifdef SAGEFLOW_ENABLE_METRICS
+  return ScopedAccumulateAtomic::now_ns();
+#else
+  return 0;
+#endif
+}
+
+// Helper to record lock wait time
+inline void metrics_record_lock_wait(uint64_t start_time) {
+#ifdef SAGEFLOW_ENABLE_METRICS
+  if (start_time > 0) {
+    JoinMetrics::instance().lock_wait_ns.fetch_add(
+      ScopedAccumulateAtomic::now_ns() - start_time, std::memory_order_relaxed);
+  }
+#else
+  (void)start_time;  // Suppress unused parameter warning
+#endif
+}
+
+// Helper to record lock wait time and also add to another metric (e.g., window_insert_ns)
+inline void metrics_record_lock_wait_dual(uint64_t start_time, std::atomic<uint64_t>& additional_metric) {
+#ifdef SAGEFLOW_ENABLE_METRICS
+  if (start_time > 0) {
+    uint64_t waited = ScopedAccumulateAtomic::now_ns() - start_time;
+    JoinMetrics::instance().lock_wait_ns.fetch_add(waited, std::memory_order_relaxed);
+    additional_metric.fetch_add(waited, std::memory_order_relaxed);
+  }
+#else
+  (void)start_time;
+  (void)additional_metric;
+#endif
+}
+
+// Helper to increment counter
+inline void metrics_increment(std::atomic<uint64_t>& counter, uint64_t value = 1) {
+#ifdef SAGEFLOW_ENABLE_METRICS
+  counter.fetch_add(value, std::memory_order_relaxed);
+#else
+  (void)counter;
+  (void)value;
+#endif
+}
+
+// Helper to record end-to-end latency
+inline void metrics_record_e2e_latency(uint64_t start_time) {
+#ifdef SAGEFLOW_ENABLE_METRICS
+  if (start_time > 0) {
+    uint64_t latency = ScopedAccumulateAtomic::now_ns() - start_time;
+    JoinMetrics::instance().e2e_latency_ns.fetch_add(latency, std::memory_order_relaxed);
+    JoinMetrics::instance().e2e_latency_count.fetch_add(1, std::memory_order_relaxed);
+  }
+#else
+  (void)start_time;
+#endif
+}
+
+// RAII wrapper for scoped timing - no-op when metrics disabled
+class MetricsTimer {
+ public:
+#ifdef SAGEFLOW_ENABLE_METRICS
+  explicit MetricsTimer(std::atomic<uint64_t>& slot) : timer_(slot) {}
+ private:
+  ScopedTimerAtomic timer_;
+#else
+  explicit MetricsTimer(std::atomic<uint64_t>&) {}
+#endif
+};
+
 } // namespace sageFlow
